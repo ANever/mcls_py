@@ -1,6 +1,7 @@
 import copy
 import numpy as np
 
+
 def rotation_vec(x):
     e = np.zeros(len(x))
     e[0] = 1
@@ -11,10 +12,10 @@ def rotation_vec(x):
     else:
         rot_vec = rot_vec_2
         
-    if rot_vec.dot(rot_vec) < 10**(-8):
-        return rot_vec
-    else:
-        rot_vec = rot_vec / np.sqrt(rot_vec.dot(rot_vec))
+    # if rot_vec.dot(rot_vec) < 10**(-8):
+    #     return rot_vec
+    # else:
+    rot_vec = rot_vec / np.sqrt(rot_vec.dot(rot_vec))
     return rot_vec
 
 def QR_housholder(A, b):

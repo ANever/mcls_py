@@ -3,7 +3,6 @@ import numpy as np
 import copy
 import itertools
 from basis import Basis
-from numpy.linalg import matrix_power
 import matplotlib.pyplot as plt
 
 from qr_solver import QR_solve
@@ -15,7 +14,15 @@ def concat(a:np.array, b:np.array):
         return a
     else:
         return np.concatenate((a, b))
-        
+
+def f_collocation_points(N):
+    points = np.zeros(N+1)
+    h = 2/(N+1)
+    points[0] = -1 + h/2
+    for i in range(1, N+1):
+        points[i] = points[i-1] + h
+    return np.array(points).reshape(N+1,1)
+
 class Solution():
 
     def __init__(self, n_dims: int, dim_sizes: np.array, area_lims: np.array, power:int, basis: Basis) -> None:
@@ -47,12 +54,12 @@ class Solution():
         else:
             cell_num = np.array(np.floor(global_point / self.steps), dtype=int)
 
-        #local_point = copy.deepcopy()
-        local_point = 2 * (np.array(global_point)/np.array(self.steps) - (cell_num - 0.5)) #TODO CHECK
+        local_point = 2 * (np.array(global_point)/np.array(self.steps) - (cell_num + 0.5))
+
         return cell_num, local_point
 
     def globalize(self, cell_num: np.array, local_point: np.array) -> np.array:
-        global_point = (np.array(local_point) + 2*np.array(cell_num) + 1) * self.steps/2 #TODO CHECK
+        global_point = (np.array(local_point) + 2*np.array(cell_num) + 1) * self.steps/2
         return global_point
 
 
@@ -62,8 +69,6 @@ class Solution():
         derivatives - np.array(n_dim, int)
         evaluation of solution function with argument x and list of partial derivatives
         '''
-        # if (derivatives < 0).any() :
-        #     raise Exception("Negative derivative")
         derivatives = np.abs(derivatives)
         
         if local:
@@ -79,48 +84,34 @@ class Solution():
             result = coefs @ basis_evaled[i]
         return result[0]
 
-    # def eval_loc(self, cell_num, local_point, derivatives):
-    #     coefs = self.cells_coefs[cell_num]
-    #     result = copy.deepcopy(coefs)
-    #     basis_evaled = self.basis.eval(local_point, derivatives)
-    #     for i in range(self.n_dims):
-    #         result = result @ basis_evaled[i]
-    #     return result[0]
-
-    def generate_system(self, cell_num: np.array, points: np.array) -> tuple:
+    def generate_system(self, cell_num: np.array, points: np.array, colloc_ops, border_ops, connect_ops = []) -> tuple:
         colloc_points, connect_points, border_points = points
-
-        #TEMP TODO move operators grom here to be set by user
-        #TEMP TODO move operators grom here to be set by user
-        #TEMP TODO move operators grom here to be set by user
-
-        w = (self.steps[0]/2)#weight
-        colloc_left_operators = [lambda _, u_bas, x, x_loc: u_bas([4]) * (w**4)]
-        colloc_right_operators = [lambda _1, _2, x, x_loc: np.exp(x)*(x**4 + 14*(x**3) + 49*(x**2) + 32*x - 12) * (w**4)]
-
-        border_left_operators = [lambda _, u_bas, x, x_loc: u_bas([0]), 
-                                    lambda _, u_bas, x, x_loc: u_bas([1]) * w]
-        border_right_operators = [lambda u, _, x, x_loc: 0,
-                                    lambda u, _, x, x_loc: 0]
 
         def dir(point: np.array) -> np.array:
             direction = (np.abs(point) == 1) * (np.sign(point)) 
             return direction
-        
-        connect_left_operators = [lambda _, u_bas, x, x_loc: u_bas([0]) + np.sum(dir(x_loc)) * u_bas(dir(x_loc)) * w,
+
+        w = (self.steps[0]/2)#weight
+        #default connection
+        if len(connect_ops) == 0:
+            connect_left_operators = [lambda _, u_bas, x, x_loc: u_bas([0]) + np.sum(dir(x_loc)) * u_bas(dir(x_loc)) * w,
                                  lambda _, u_bas, x, x_loc: u_bas(2*dir(x_loc))* w**2 + np.sum(dir(x_loc)) * u_bas(3*dir(x_loc))* w**3]
-        connect_right_operators = [lambda _, u_nei, x, x_loc: u_nei([0]) + np.sum(dir(x_loc))*u_nei(dir(x_loc))* w,
-                                 lambda _, u_nei, x, x_loc: u_nei(2*dir(x_loc))* w**2 + np.sum(dir(x_loc)) * u_nei(3*dir(x_loc))* w**3]
+            connect_right_operators = [lambda _, u_nei, x, x_loc: u_nei([0]) + np.sum(dir(x_loc))*u_nei(dir(x_loc))* w,
+                                        lambda _, u_nei, x, x_loc: u_nei(2*dir(x_loc))* w**2 + np.sum(dir(x_loc)) * u_nei(3*dir(x_loc))* w**3]
+            connect_ops = [connect_left_operators, connect_right_operators]
 
+        #default colloc points
+        if len(colloc_points) == 0:
+            colloc_points = f_collocation_points(self.power)
+        
+        connect_left_operators, connect_right_operators = connect_ops
 
-        #TEMP TODO move operators grom here to be set by user
-        #TEMP TODO move operators grom here to be set by user
-        #TEMP TODO move operators grom here to be set by user
+        colloc_left_operators, colloc_right_operators = colloc_ops
 
+        border_left_operators, border_right_operators = border_ops
 
         colloc_mat, colloc_r = self.generate_subsystem(colloc_left_operators, colloc_right_operators, cell_num, colloc_points)
-        #colloc_mat, colloc_r = self.generate_colloc(cell_num, colloc_points)
-       
+        
         left_borders = cell_num == np.zeros(self.n_dims)
         right_borders = cell_num == (self.dim_sizes-1)
         
@@ -129,39 +120,42 @@ class Solution():
         border_points_for_use = border_points[np.logical_or(left_border_for_use, right_border_for_use)]
 
         border_mat, border_r = self.generate_subsystem(border_left_operators, border_right_operators, cell_num, border_points_for_use)
-        #border_mat, border_r = self.generate_border(cell_num, border_points_for_use)
         
         left_connect_for_use = np.array([np.logical_and(point == -1, ~left_borders).any() for point in connect_points])
         right_connect_for_use = np.array([np.logical_and(point == 1, ~right_borders).any() for point in connect_points])
         connect_points_for_use = connect_points[np.logical_or(left_connect_for_use, right_connect_for_use)] 
-
         # print('border', border_points_for_use, '\n connect', connect_points_for_use)
         
         connect_mat, connect_r = self.generate_subsystem(connect_left_operators, connect_right_operators, cell_num, connect_points_for_use)
-        #connect_mat, connect_r = self.generate_connect(cell_num, connect_points_for_use)
-
+        
         #print('colloc ', colloc_mat,'\nborder ', border_mat,'\nconnect ', connect_mat)
         res_mat = concat(concat(colloc_mat, border_mat), connect_mat)
         res_right = concat(concat(colloc_r, border_r), connect_r)
 
-        print(res_mat,'\n-------\n', res_right, '\n\n')
+        # print(res_mat,'\n-------\n', res_right, '\n\n')
         return res_mat, res_right
 
-    def iterate_cells(self, points) -> None:
+    def iterate_cells(self, **kwargs) -> None:
         inds = [list(range(size)) for size in self.dim_sizes]
         all_cells = list(itertools.product(*inds))
         cell_shape = tuple([self.power]*self.n_dims)
-
-        new_cell_coefs = copy.deepcopy(self.cells_coefs)
-
+        # new_cell_coefs = copy.deepcopy(self.cells_coefs)
         for cell in all_cells:
-            mat, right = self.generate_system(cell, points)
-            # self.cells_coefs[cell] = QR_solve(mat, right).reshape(cell_shape)
-            new_cell_coefs[cell] = QR_solve(mat, right).reshape(cell_shape)
-        
-        self.cells_coefs = new_cell_coefs
+            mat, right = self.generate_system(cell, **kwargs)
+            self.cells_coefs[cell] = QR_solve(mat, right).reshape(cell_shape)
+            # new_cell_coefs[cell] = QR_solve(mat, right).reshape(cell_shape)
+        # self.cells_coefs = new_cell_coefs
 
-        
+    def solve(self, threshold = 1e-10, max_iter = 10000, verbose=False, **kwargs) -> None:
+        prev_coefs = copy.deepcopy(self.cells_coefs)
+        for i in range(max_iter):
+            self.iterate_cells(**kwargs)
+            if np.max(np.abs((prev_coefs - self.cells_coefs))) < threshold:
+                break
+            prev_coefs = copy.deepcopy(self.cells_coefs)
+        if verbose:
+            print('Iterations to converge: ', i)
+
     def generate_eq(self, cell_num, left_side_operator, right_side_operator, points): #TODO refactor u_loc, u_bas, u_nei choice
         '''
         basic func for generating equation
@@ -171,7 +165,6 @@ class Solution():
             loc_point = copy.deepcopy(point)
             global_point = self.globalize(cell_num, point)
             x = copy.deepcopy(global_point)
-            # u_loc = lambda der: self.eval_loc(cell_num, loc_point, der)   # for linearization purpses
             u_loc = lambda der: self.eval(loc_point, der, local = True, cell_num = cell_num)   # for linearization purpses
             u_bas = lambda der: self.basis.eval(loc_point, der)
             return operator(u_loc, u_bas, x, loc_point)
@@ -185,14 +178,11 @@ class Solution():
             global_point = self.globalize(cell_num, point)
             x = global_point
             loc_point = copy.deepcopy(point)            
-            # u_loc = lambda der: self.eval_loc(cell_num, loc_point, der)
             u_loc = lambda der: self.eval(loc_point, der, local = True, cell_num = cell_num)   # for linearization purpses
 
             neigh_point = loc_point-2*dir(loc_point)
             # u_nei = lambda der: self.eval_loc(cell_num + dir(loc_point), neigh_point, der) #neighbour cell for connection eqs
-            u_nei = lambda der: self.eval(neigh_point, der, local = True, cell_num = cell_num + dir(loc_point))   # for linearization purpses
-            # i dont understand why -dir(x) works and +dir(x) doesnt
-            #u = lambda point, der: self.eval_loc(cell_num, point, der)
+            u_nei = lambda der: self.eval(neigh_point, der, local = True, cell_num = cell_num + dir(loc_point)) 
             return operator(u_loc, u_nei, global_point, loc_point) #x
         
         mat = np.zeros((len(points), self.cell_size))
@@ -201,7 +191,6 @@ class Solution():
             mat[i] = left_side(left_side_operator, cell_num,  points[i])
             r_side[i] = right_side(right_side_operator, cell_num, points[i])
         return mat, r_side
-
 
     def generate_subsystem(self, left_ops, right_ops, cell_num, points: np.array) -> tuple:
         mat, r = self.generate_eq(cell_num, left_ops[0], right_ops[0], points)
@@ -218,13 +207,24 @@ class Solution():
         func = np.zeros(n)
         grid = np.linspace(self.area_lims[0,0], self.area_lims[0,1], n, endpoint=False)
         for i in range(len(grid)): 
-            func[i] = self.eval(grid[i],[0])
+            func[i] = self.eval(grid[i], [0])
         plt.plot(func)
         plt.show()
 
 
 if __name__ == '__main__':
-    power = 3
+    
+    def f_collocation_points(N):
+        points = np.zeros(N+1)
+        h = 2/(N+1)
+        points[0] = -1 + h/2
+        for i in range(1, N+1):
+            points[i] = points[i-1] + h
+        return np.array(points).reshape(N+1,1)
+    colloc_points = f_collocation_points(4)
+
+
+    power = 5
     params = {
         'n_dims': 1,
         'dim_sizes': np.array([5]),
@@ -234,11 +234,25 @@ if __name__ == '__main__':
     }
     sol = Solution(**params)
 
-    colloc_points = np.linspace(-1,1,4,endpoint=True).reshape(4,1)
+    w = (sol.steps[0]/2)
+
+    colloc_left_operators = [lambda u_loc, u_bas, x, x_loc: u_bas([4]) * (w**4)]
+    colloc_right_operators = [lambda u_loc, u_nei, x, x_loc: np.exp(x)*(x**4 + 14*(x**3) + 49*(x**2) + 32*x - 12) * (w**4)]
+    colloc_ops = [colloc_left_operators, colloc_right_operators]
+
+    border_left_operators = [lambda _, u_bas, x, x_loc: u_bas([0]), 
+                                lambda _, u_bas, x, x_loc: u_bas([1]) * w]
+    border_right_operators = [lambda u, _, x, x_loc: 0,
+                                lambda u, _, x, x_loc: 0 * w]
+    border_ops = [border_left_operators, border_right_operators]
+
     connect_points = np.array([[-1], [1]])
     border_points = connect_points
 
     points = (colloc_points, connect_points, border_points)
-    # border_points = [-1, 1]
 
-    sol.iterate_cells(points)
+    iteration_dict = {'points':points,
+                    'colloc_ops':colloc_ops,
+                    'border_ops':border_ops}
+
+    sol.iterate_cells(**iteration_dict)
