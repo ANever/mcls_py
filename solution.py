@@ -3,9 +3,11 @@ import numpy as np
 import copy
 import itertools
 from basis import Basis
-import matplotlib.pyplot as plt
 
 from qr_solver import QR_solve
+
+import matplotlib.pyplot as plt
+from matplotlib import cm
 
 def concat(a:np.array, b:np.array):
     if b.size == 0:
@@ -40,11 +42,11 @@ class Solution():
         self.init_grid()
         self.steps = ((self.area_lims[:,1] - self.area_lims[:,0]) / self.dim_sizes)
         
-        self.basis = Basis(power, steps=self.steps)
+        self.basis = Basis(power, steps=self.steps, n_dims = n_dims)
 
     def init_grid(self) -> None:
-        cells_shape = tuple(list(self.dim_sizes) + [self.power]*self.n_dims)
-        self.cells_coefs = np.ones(cells_shape) * 0.4
+        self.cells_shape = tuple(list(self.dim_sizes) + [self.power]*self.n_dims)
+        self.cells_coefs = np.ones(self.cells_shape) * 0.4
         self.cell_size = self.power**self.n_dims
         
     def localize(self, global_point: np.array, cells_closed_right: bool = False) -> np.array:
@@ -76,13 +78,13 @@ class Solution():
         else:
             cell_num, local_point = self.localize(point, cells_closed_right)
         
-        coefs = self.cells_coefs[cell_num]
+        coefs = self.cells_coefs[tuple(cell_num)]
         result = copy.deepcopy(coefs)
         #applying coefs tensor to evaled basis in point
-        basis_evaled = self.basis.eval(local_point, derivatives)
-        for i in range(self.n_dims):
-            result = coefs @ basis_evaled[i]
-        return result[0]
+        basis_evaled = self.basis.eval(local_point, derivatives, ravel=False)
+        for b_e in basis_evaled[::-1]:
+            result = result @ b_e
+        return result
 
     def generate_system(self, cell_num: np.array, points: np.array, colloc_ops, border_ops, connect_ops = []) -> tuple:
         colloc_points, connect_points, border_points = points
@@ -94,9 +96,9 @@ class Solution():
         w = (self.steps[0]/2)#weight
         #default connection
         if len(connect_ops) == 0:
-            connect_left_operators = [lambda _, u_bas, x, x_loc: u_bas([0]) + np.sum(dir(x_loc)) * u_bas(dir(x_loc)) * w,
+            connect_left_operators = [lambda _, u_bas, x, x_loc: u_bas(0*dir(x_loc)) + np.sum(dir(x_loc)) * u_bas(dir(x_loc)) * w,
                                  lambda _, u_bas, x, x_loc: u_bas(2*dir(x_loc))* w**2 + np.sum(dir(x_loc)) * u_bas(3*dir(x_loc))* w**3]
-            connect_right_operators = [lambda _, u_nei, x, x_loc: u_nei([0]) + np.sum(dir(x_loc))*u_nei(dir(x_loc))* w,
+            connect_right_operators = [lambda _, u_nei, x, x_loc: u_nei(0*dir(x_loc)) + np.sum(dir(x_loc))*u_nei(dir(x_loc))* w,
                                         lambda _, u_nei, x, x_loc: u_nei(2*dir(x_loc))* w**2 + np.sum(dir(x_loc)) * u_nei(3*dir(x_loc))* w**3]
             connect_ops = [connect_left_operators, connect_right_operators]
 
@@ -127,10 +129,10 @@ class Solution():
         # print('border', border_points_for_use, '\n connect', connect_points_for_use)
         
         connect_mat, connect_r = self.generate_subsystem(connect_left_operators, connect_right_operators, cell_num, connect_points_for_use)
-        
+        connect_weight = 1
         #print('colloc ', colloc_mat,'\nborder ', border_mat,'\nconnect ', connect_mat)
-        res_mat = concat(concat(colloc_mat, border_mat), connect_mat)
-        res_right = concat(concat(colloc_r, border_r), connect_r)
+        res_mat = concat(concat(colloc_mat, border_mat), connect_mat * connect_weight)
+        res_right = concat(concat(colloc_r, border_r), connect_r * connect_weight)
 
         # print(res_mat,'\n-------\n', res_right, '\n\n')
         return res_mat, res_right
@@ -156,7 +158,7 @@ class Solution():
         if verbose:
             print('Iterations to converge: ', i)
 
-    def generate_eq(self, cell_num, left_side_operator, right_side_operator, points): #TODO refactor u_loc, u_bas, u_nei choice
+    def generate_eq(self, cell_num, left_side_operator, right_side_operator, points):
         '''
         basic func for generating equation
         '''
@@ -166,7 +168,7 @@ class Solution():
             global_point = self.globalize(cell_num, point)
             x = copy.deepcopy(global_point)
             u_loc = lambda der: self.eval(loc_point, der, local = True, cell_num = cell_num)   # for linearization purpses
-            u_bas = lambda der: self.basis.eval(loc_point, der)
+            u_bas = lambda der: self.basis.eval(loc_point, der, ravel=True)
             return operator(u_loc, u_bas, x, loc_point)
 
         def right_side(operator, cell_num, point: np.array) -> np.float:
@@ -181,6 +183,9 @@ class Solution():
             u_loc = lambda der: self.eval(loc_point, der, local = True, cell_num = cell_num)   # for linearization purpses
 
             neigh_point = loc_point-2*dir(loc_point)
+
+            #print('Cell:', cell_num, ' point:' , point, ' Neigh_cell:', cell_num + dir(loc_point))
+
             # u_nei = lambda der: self.eval_loc(cell_num + dir(loc_point), neigh_point, der) #neighbour cell for connection eqs
             u_nei = lambda der: self.eval(neigh_point, der, local = True, cell_num = cell_num + dir(loc_point)) 
             return operator(u_loc, u_nei, global_point, loc_point) #x
@@ -197,20 +202,41 @@ class Solution():
         #print(mat)
         for i in range(1,len(left_ops)):
             mat_small, r_small = self.generate_eq(cell_num, left_ops[i], right_ops[i], points)
-            #print(mat_small)
             mat = concat(mat, mat_small)
             r = concat(r, r_small)
         return mat, r
     
-    def plot(self):
-        n = 1000
+    def plot(self, n = 1000):
         func = np.zeros(n)
         grid = np.linspace(self.area_lims[0,0], self.area_lims[0,1], n, endpoint=False)
         for i in range(len(grid)): 
             func[i] = self.eval(grid[i], [0])
         plt.plot(func)
         plt.show()
+    
+    def plot2d(self, n=100):
+        func = np.zeros((n,n))
+        ax1 = np.linspace(self.area_lims[0,0], self.area_lims[0,1], n, endpoint=False)
+        ax2 = np.linspace(self.area_lims[1,0], self.area_lims[1,1], n, endpoint=False)
+        X, Y = np.meshgrid(ax1, ax2)
 
+        for i in range(n):
+            for j in range(n): 
+                func[i, j] = self.eval([ax1[i], ax2[j]], [0,0])
+
+        fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+        surf = ax.plot_surface(X, Y, func, cmap=cm.coolwarm,
+                       linewidth=0, antialiased=False)
+
+        fig.colorbar(surf, shrink=0.5, aspect=5)
+
+        plt.show()
+
+
+
+
+
+#______________________________TESTING________________________
 
 if __name__ == '__main__':
     
